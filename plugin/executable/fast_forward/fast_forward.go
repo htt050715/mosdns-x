@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
@@ -52,9 +53,11 @@ type fastForward struct {
 
 	upstreamWrappers []bundled_upstream.Upstream
 	upstreamsCloser  []io.Closer
+	counter          atomic.Uint64
 }
 
 type Args struct {
+	Strategy string            `yaml:"strategy"`
 	Upstream []*UpstreamConfig `yaml:"upstream"`
 	CA       []string          `yaml:"ca"`
 }
@@ -82,6 +85,11 @@ func Init(bp *coremain.BP, args interface{}) (p coremain.Plugin, err error) {
 }
 
 func newFastForward(bp *coremain.BP, args *Args) (*fastForward, error) {
+	switch args.Strategy {
+	case "", "parallel", "fallback", "round_robin":
+	default:
+		return nil, fmt.Errorf("unknown upstream strategy %s", args.Strategy)
+	}
 	if len(args.Upstream) == 0 {
 		return nil, errors.New("no upstream is configured")
 	}
@@ -187,7 +195,38 @@ func (f *fastForward) Exec(ctx context.Context, qCtx *query_context.Context, nex
 }
 
 func (f *fastForward) exec(ctx context.Context, qCtx *query_context.Context) (err error) {
-	r, err := bundled_upstream.ExchangeParallel(ctx, qCtx, f.upstreamWrappers, f.L())
+	strategy := f.args.Strategy
+	if strategy == "" {
+		strategy = "parallel"
+	}
+	query_context.RecordAudit(ctx, "group", f.Tag(), strategy)
+	var r *dns.Msg
+	if strategy == "parallel" {
+		r, err = bundled_upstream.ExchangeParallel(ctx, qCtx, f.upstreamWrappers, f.L())
+	} else {
+		start := 0
+		if strategy == "round_robin" {
+			start = int((f.counter.Add(1) - 1) % uint64(len(f.upstreamWrappers)))
+		}
+		for i := 0; i < len(f.upstreamWrappers); i++ {
+			u := f.upstreamWrappers[(start+i)%len(f.upstreamWrappers)]
+			child, cancel := context.WithTimeout(ctx, 2*time.Second)
+			r, err = u.Exchange(child, qCtx.Q().Copy())
+			cancel()
+			if err == nil && r != nil && (u.Trusted() || r.Rcode == dns.RcodeSuccess) {
+				query_context.RecordAudit(ctx, "upstream", "", u.Address())
+				break
+			}
+			if err == nil {
+				err = bundled_upstream.ErrAllFailed
+			}
+			r = nil
+			if ctx.Err() != nil {
+				err = ctx.Err()
+				break
+			}
+		}
+	}
 	if err != nil {
 		return err
 	}

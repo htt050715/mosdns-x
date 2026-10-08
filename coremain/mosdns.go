@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/pprof"
+	"os"
 	"runtime"
 	"runtime/debug"
 	"time"
@@ -33,9 +34,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
 
+	"context"
 	"github.com/pmkol/mosdns-x/mlog"
 	"github.com/pmkol/mosdns-x/pkg/data_provider"
 	"github.com/pmkol/mosdns-x/pkg/executable_seq"
+	"github.com/pmkol/mosdns-x/pkg/query_context"
 	"github.com/pmkol/mosdns-x/pkg/safe_close"
 )
 
@@ -73,6 +76,7 @@ func RunMosdns(cfg *Config) error {
 		metricsReg:  newMetricsReg(),
 		sc:          safe_close.NewSafeClose(),
 	}
+	defer func() { m.sc.Done(); m.sc.CloseWait() }()
 
 	m.httpAPIMux.Handle("/metrics", promhttp.HandlerFor(m.metricsReg, promhttp.HandlerOpts{}))
 	m.httpAPIMux.HandleFunc("/debug/pprof/", pprof.Index)
@@ -85,6 +89,7 @@ func RunMosdns(cfg *Config) error {
 			return errors.New("api.webui requires api.http")
 		}
 		m.panel = newWebPanel(cfg, m.metricsReg)
+		m.panel.manager = m.dataManager
 		m.panel.register(m.httpAPIMux)
 	}
 
@@ -98,12 +103,30 @@ func RunMosdns(cfg *Config) error {
 			return fmt.Errorf("duplicated provider tag %s", dpc.Tag)
 		}
 		dupTag[dpc.Tag] = struct{}{}
+		// Validation may fetch a new subscription, but must not create or modify
+		// the live rule cache before the configuration has been accepted.
+		if cfg.checkOnly && dpc.URL != "" {
+			if _, err := os.Stat(dpc.File); os.IsNotExist(err) {
+				f, err := os.CreateTemp("", "mosdns-rule-check-*")
+				if err != nil {
+					return err
+				}
+				f.Close()
+				os.Remove(f.Name())
+				dpc.File = f.Name()
+				defer os.Remove(dpc.File)
+			}
+		}
 
 		dp, err := data_provider.NewDataProvider(lg, dpc)
 		if err != nil {
 			return fmt.Errorf("failed to init data provider %s, %w", dpc.Tag, err)
 		}
 		m.dataManager.AddDataProvider(dpc.Tag, dp)
+		m.sc.Attach(func(done func(), signal <-chan struct{}) { defer done(); <-signal; dp.Close() })
+		if !cfg.checkOnly {
+			dp.StartRemoteUpdates()
+		}
 	}
 
 	// Init preset plugins
@@ -141,6 +164,14 @@ func RunMosdns(cfg *Config) error {
 
 	if len(cfg.Servers) == 0 {
 		return errors.New("no server is configured")
+	}
+	if cfg.checkOnly {
+		for _, s := range cfg.Servers {
+			if m.execs[s.Exec] == nil {
+				return fmt.Errorf("unknown server entry %s", s.Exec)
+			}
+		}
+		return validatePanelConfig(cfg)
 	}
 	for i, sc := range cfg.Servers {
 		if err := m.startServers(&sc); err != nil {
@@ -183,11 +214,42 @@ func RunMosdns(cfg *Config) error {
 func (m *Mosdns) addPlugin(p Plugin) {
 	t := p.Tag()
 	if p, ok := p.(ExecutablePlugin); ok {
-		m.execs[t] = p
+		if m.panel != nil {
+			m.execs[t] = &panelExecutable{Executable: p, tag: t}
+		} else {
+			m.execs[t] = p
+		}
 	}
 	if p, ok := p.(MatcherPlugin); ok {
-		m.matchers[p.Tag()] = p
+		if m.panel != nil {
+			m.matchers[p.Tag()] = &panelMatcher{Matcher: p, tag: t}
+		} else {
+			m.matchers[p.Tag()] = p
+		}
 	}
+}
+
+type panelExecutable struct {
+	executable_seq.Executable
+	tag string
+}
+
+func (p *panelExecutable) Exec(ctx context.Context, q *query_context.Context, n executable_seq.ExecutableChainNode) error {
+	query_context.RecordAudit(ctx, "step", p.tag, "")
+	return p.Executable.Exec(ctx, q, n)
+}
+
+type panelMatcher struct {
+	executable_seq.Matcher
+	tag string
+}
+
+func (p *panelMatcher) Match(ctx context.Context, q *query_context.Context) (bool, error) {
+	ok, err := p.Matcher.Match(ctx, q)
+	if ok {
+		query_context.RecordAudit(ctx, "match", p.tag, "")
+	}
+	return ok, err
 }
 
 func (m *Mosdns) GetDataManager() *data_provider.DataManager {

@@ -2,6 +2,7 @@
 package coremain
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"embed"
@@ -13,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -23,6 +25,10 @@ import (
 
 	"github.com/miekg/dns"
 	"github.com/pmkol/mosdns-x/constant"
+	"github.com/pmkol/mosdns-x/pkg/data_provider"
+	"github.com/pmkol/mosdns-x/pkg/hosts"
+	"github.com/pmkol/mosdns-x/pkg/matcher/domain"
+	"github.com/pmkol/mosdns-x/pkg/matcher/netlist"
 	"github.com/pmkol/mosdns-x/pkg/query_context"
 	D "github.com/pmkol/mosdns-x/pkg/server/dns_handler"
 	"github.com/pmkol/mosdns-x/pkg/utils"
@@ -34,24 +40,30 @@ import (
 var panelAssets embed.FS
 
 type panelAnswer struct {
-	Type string `json:"type"`
-	TTL  uint32 `json:"ttl"`
-	Data string `json:"data"`
+	Name  string `json:"name"`
+	Value string `json:"value"`
+	Type  string `json:"type"`
+	TTL   uint32 `json:"ttl"`
+	Data  string `json:"data"`
 }
 
 type panelLog struct {
-	TraceID          string        `json:"trace_id"`
-	QueryTime        time.Time     `json:"query_time"`
-	QueryName        string        `json:"query_name"`
-	QueryType        string        `json:"query_type"`
-	ClientIP         string        `json:"client_ip"`
-	Protocol         string        `json:"protocol"`
-	Entry            string        `json:"entry"`
-	DurationMS       float64       `json:"duration_ms"`
-	ResponseCode     string        `json:"response_code"`
-	Answers          []panelAnswer `json:"answers"`
-	AnswersTruncated bool          `json:"answers_truncated,omitempty"`
-	Error            string        `json:"error,omitempty"`
+	TraceID          string                     `json:"trace_id"`
+	QueryTime        time.Time                  `json:"query_time"`
+	QueryName        string                     `json:"query_name"`
+	QueryType        string                     `json:"query_type"`
+	ClientIP         string                     `json:"client_ip"`
+	Protocol         string                     `json:"protocol"`
+	Entry            string                     `json:"entry"`
+	DurationMS       float64                    `json:"duration_ms"`
+	ResponseCode     string                     `json:"response_code"`
+	Answers          []panelAnswer              `json:"answers"`
+	AnswersTruncated bool                       `json:"answers_truncated,omitempty"`
+	Error            string                     `json:"error,omitempty"`
+	Trace            []query_context.AuditEvent `json:"trace"`
+	Upstream         string                     `json:"upstream,omitempty"`
+	Group            string                     `json:"group,omitempty"`
+	Cache            string                     `json:"cache,omitempty"`
 }
 
 type webPanel struct {
@@ -66,6 +78,7 @@ type webPanel struct {
 	cfg         *Config
 	reg         *prometheus.Registry
 	configMu    sync.Mutex
+	manager     *data_provider.DataManager
 }
 
 func newWebPanel(cfg *Config, reg *prometheus.Registry) *webPanel {
@@ -86,6 +99,7 @@ type auditedHandler struct {
 }
 
 func (h *auditedHandler) ServeDNS(ctx context.Context, req *dns.Msg, meta *query_context.RequestMeta) (*dns.Msg, error) {
+	ctx, trace := query_context.WithAudit(ctx)
 	log := panelLog{QueryTime: time.Now(), Entry: h.entry, TraceID: strconv.FormatUint(h.panel.sequence.Add(1), 10), Answers: []panelAnswer{}}
 	if len(req.Question) > 0 {
 		q := req.Question[0]
@@ -99,9 +113,24 @@ func (h *auditedHandler) ServeDNS(ctx context.Context, req *dns.Msg, meta *query
 		log.Protocol = meta.GetProtocol()
 	}
 	resp, err := h.next.ServeDNS(ctx, req, meta)
+	log.Trace = trace.Finish()
+	for i := range log.Trace {
+		e := &log.Trace[i]
+		e.Detail = fmt.Sprint(redactPanelValue(e.Detail, ""))
+		switch e.Kind {
+		case "upstream":
+			log.Upstream = e.Detail
+		case "group":
+			log.Group = e.Tag
+		case "cache":
+			log.Cache = e.Tag + " / " + e.Detail
+		case "error":
+			log.Error = e.Detail
+		}
+	}
 	log.DurationMS = float64(time.Since(log.QueryTime)) / float64(time.Millisecond)
 	if err != nil {
-		log.Error = err.Error()
+		log.Error = fmt.Sprint(redactPanelValue(err.Error(), ""))
 	}
 	if resp != nil {
 		log.ResponseCode = dns.RcodeToString[resp.Rcode]
@@ -116,8 +145,17 @@ func (h *auditedHandler) ServeDNS(ctx context.Context, req *dns.Msg, meta *query
 				log.AnswersTruncated = true
 				break
 			}
-			answerBytes += len(data)
-			log.Answers = append(log.Answers, panelAnswer{Type: dns.Type(rr.Header().Rrtype).String(), TTL: rr.Header().Ttl, Data: data})
+			parts := strings.SplitN(data, "\t", 5)
+			value := data
+			if len(parts) == 5 {
+				value = parts[4]
+			}
+			if answerBytes+len(data)+len(value)+len(rr.Header().Name) > 16384 {
+				log.AnswersTruncated = true
+				break
+			}
+			answerBytes += len(data) + len(value) + len(rr.Header().Name)
+			log.Answers = append(log.Answers, panelAnswer{Name: rr.Header().Name, Value: value, Type: dns.Type(rr.Header().Rrtype).String(), TTL: rr.Header().Ttl, Data: data})
 		}
 	}
 	h.panel.record(log)
@@ -161,7 +199,11 @@ func panelError(w http.ResponseWriter, status int, err any) {
 }
 
 func panelBody(w http.ResponseWriter, r *http.Request, value any) error {
-	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+	limit := int64(2 << 20)
+	if r.URL.Path == "/api/v1/rule-file" {
+		limit = 4 << 20
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	d := json.NewDecoder(r.Body)
 	d.DisallowUnknownFields()
 	if err := d.Decode(value); err != nil {
@@ -220,6 +262,52 @@ func (p *webPanel) protect(next http.Handler) http.Handler {
 
 func (p *webPanel) serveAPI(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
+	if path == "/api/v1/rule-file" || path == "/api/v1/rule-refresh" || path == "/api/v1/rule-preview" {
+		p.serveRuleFile(w, r)
+		return
+	}
+	if path == "/api/v1/config/format" {
+		if r.Method != "POST" {
+			panelError(w, 405, "POST required")
+			return
+		}
+		var body struct {
+			Text string `json:"text"`
+		}
+		if err := panelBody(w, r, &body); err != nil {
+			panelError(w, 400, err)
+			return
+		}
+		var doc yaml.Node
+		if err := yaml.Unmarshal([]byte(body.Text), &doc); err != nil {
+			panelError(w, 400, err)
+			return
+		}
+		var out bytes.Buffer
+		enc := yaml.NewEncoder(&out)
+		enc.SetIndent(2)
+		if err := enc.Encode(&doc); err != nil {
+			panelError(w, 400, err)
+			return
+		}
+		_ = enc.Close()
+		panelJSON(w, 200, map[string]any{"text": out.String()})
+		return
+	}
+	if path == "/api/v1/config/apply-status" && r.Method == "GET" {
+		b, err := os.ReadFile(filepath.Join(filepath.Dir(p.cfg.configFile), ".panel-apply-status.json"))
+		if err != nil {
+			panelJSON(w, 200, map[string]any{"state": "idle"})
+			return
+		}
+		var v any
+		if json.Unmarshal(b, &v) != nil {
+			panelError(w, 500, "invalid apply status")
+			return
+		}
+		panelJSON(w, 200, v)
+		return
+	}
 	if path == "/api/v1/config" {
 		p.serveConfig(w, r)
 		return
@@ -289,7 +377,7 @@ func (p *webPanel) serveAPI(w http.ResponseWriter, r *http.Request) {
 	case "/api/v1/system/info":
 		var mem runtime.MemStats
 		runtime.ReadMemStats(&mem)
-		panelJSON(w, 200, map[string]any{"version": constant.Version, "build_time": constant.BuildTime, "go_version": runtime.Version(), "platform": runtime.GOOS + "/" + runtime.GOARCH, "uptime_seconds": time.Since(p.started).Seconds(), "memory_bytes": mem.Alloc, "goroutines": runtime.NumGoroutine(), "config_write": p.cfg.API.AllowConfigWrite && p.cfg.configFile != "", "config_file": filepath.Base(p.cfg.configFile)})
+		panelJSON(w, 200, map[string]any{"version": constant.Version, "build_time": constant.BuildTime, "go_version": runtime.Version(), "platform": runtime.GOOS + "/" + runtime.GOARCH, "uptime_seconds": time.Since(p.started).Seconds(), "memory_bytes": mem.Alloc, "goroutines": runtime.NumGoroutine(), "config_write": p.cfg.API.AllowConfigWrite && p.cfg.configFile != "", "config_file": filepath.Base(p.cfg.configFile), "can_apply": len(p.cfg.API.ApplyCommand) > 0, "panel_revision": "management-v2"})
 	case "/api/v1/runtime/config":
 		b, err := yaml.Marshal(p.cfg)
 		if err != nil {
@@ -361,7 +449,7 @@ func (p *webPanel) serveLogs(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if q != "" {
-			fields := []string{log.QueryName, log.QueryType, log.ClientIP, log.TraceID, log.ResponseCode, log.Entry}
+			fields := []string{log.QueryName, log.QueryType, log.ClientIP, log.TraceID, log.ResponseCode, log.Entry, log.Upstream, log.Group, log.Cache, log.Error}
 			for _, a := range log.Answers {
 				fields = append(fields, a.Data)
 			}
@@ -437,10 +525,25 @@ func (p *webPanel) serveConfig(w http.ResponseWriter, r *http.Request) {
 		Text         string `json:"text"`
 		SHA256       string `json:"sha256"`
 		ValidateOnly bool   `json:"validate_only"`
+		Apply        bool   `json:"apply"`
 	}
 	if err := panelBody(w, r, &body); err != nil {
 		panelError(w, 400, err)
 		return
+	}
+	if body.ValidateOnly {
+		body.Apply = false
+	}
+	if !body.ValidateOnly {
+		status, _ := os.ReadFile(filepath.Join(filepath.Dir(path), ".panel-apply-status.json"))
+		var state struct {
+			State   string    `json:"state"`
+			Started time.Time `json:"started"`
+		}
+		if json.Unmarshal(status, &state) == nil && state.State == "applying" && time.Since(state.Started) < 2*time.Minute {
+			panelError(w, 409, "已有配置正在应用，请等待完成后再保存")
+			return
+		}
 	}
 	if body.SHA256 != configDigest(b) {
 		panelError(w, 409, "configuration changed on disk; reload before saving")
@@ -480,6 +583,38 @@ func (p *webPanel) serveConfig(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		err = validatePanelConfig(cfg)
 	}
+	if err == nil && len(p.cfg.API.ApplyCommand) > 0 {
+		ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+		defer cancel()
+		binary, e := os.Executable()
+		if e != nil {
+			err = e
+		} else {
+			cmd := exec.CommandContext(ctx, binary, "check", "-c", temp, "-d", filepath.Dir(path))
+			out, e := cmd.CombinedOutput()
+			if e != nil {
+				err = fmt.Errorf("运行校验失败: %s", string(out[max(0, len(out)-4000):]))
+			}
+		}
+	}
+	if body.Apply && err == nil {
+		if len(p.cfg.API.ApplyCommand) == 0 {
+			err = fmt.Errorf("未配置服务应用命令")
+		}
+		if cfg.API.HTTP != p.cfg.API.HTTP || !cfg.API.WebUI || !cfg.API.AllowConfigWrite {
+			err = fmt.Errorf("应用时请保留当前面板监听地址和配置编辑开关")
+		}
+		if cfg.API.HTTP != "" && cfg.API.HTTP == p.cfg.API.HTTP {
+			status, _ := os.ReadFile(filepath.Join(filepath.Dir(path), ".panel-apply-status.json"))
+			var state struct {
+				State   string    `json:"state"`
+				Started time.Time `json:"started"`
+			}
+			if json.Unmarshal(status, &state) == nil && state.State == "applying" && time.Since(state.Started) < 2*time.Minute {
+				err = fmt.Errorf("已有配置正在应用，请等待完成")
+			}
+		}
+	}
 	if err != nil {
 		panelError(w, 400, err)
 		return
@@ -511,7 +646,177 @@ func (p *webPanel) serveConfig(w http.ResponseWriter, r *http.Request) {
 		panelError(w, 500, err)
 		return
 	}
-	panelJSON(w, 200, map[string]any{"saved": true, "restart_required": true, "sha256": configDigest([]byte(body.Text)), "backup": filepath.Base(backup)})
+	if body.Apply {
+		status := filepath.Join(filepath.Dir(path), ".panel-apply-status.json")
+		state, _ := json.Marshal(map[string]any{"state": "applying", "started": time.Now().UTC(), "sha256": configDigest([]byte(body.Text))})
+		if err := os.WriteFile(status, state, 0600); err != nil {
+			_ = os.WriteFile(path, b, info.Mode().Perm())
+			panelError(w, 500, err)
+			return
+		}
+		args := append(append([]string{}, p.cfg.API.ApplyCommand[1:]...), path, backup, status)
+		cmd := exec.Command(p.cfg.API.ApplyCommand[0], args...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			_ = os.WriteFile(path, b, info.Mode().Perm())
+			_ = os.Remove(status)
+			panelError(w, 500, fmt.Errorf("无法启动应用任务: %s", out))
+			return
+		}
+	}
+	panelJSON(w, 200, map[string]any{"saved": true, "restart_required": !body.Apply, "applying": body.Apply, "sha256": configDigest([]byte(body.Text)), "backup": filepath.Base(backup)})
+}
+
+func (p *webPanel) serveRuleFile(w http.ResponseWriter, r *http.Request) {
+	if !p.cfg.API.AllowConfigWrite {
+		panelError(w, 403, "规则编辑未开启")
+		return
+	}
+	if r.URL.Path == "/api/v1/rule-preview" {
+		if r.Method != "POST" {
+			panelError(w, 405, "POST required")
+			return
+		}
+		var body struct {
+			URL string `json:"url"`
+		}
+		if err := panelBody(w, r, &body); err != nil {
+			panelError(w, 400, err)
+			return
+		}
+		b, err := data_provider.FetchRemoteDomains(r.Context(), body.URL)
+		if err != nil {
+			panelError(w, 400, err)
+			return
+		}
+		lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+		panelJSON(w, 200, map[string]any{"count": len(lines), "preview": strings.Join(lines[:min(20, len(lines))], "\n")})
+		return
+	}
+	tag := r.URL.Query().Get("tag")
+	var body struct {
+		Tag    string `json:"tag"`
+		Text   string `json:"text"`
+		SHA256 string `json:"sha256"`
+	}
+	if r.Method == "POST" {
+		if err := panelBody(w, r, &body); err != nil {
+			panelError(w, 400, err)
+			return
+		}
+		tag = body.Tag
+	}
+	var provider *data_provider.DataProviderConfig
+	for i := range p.cfg.DataProviders {
+		if p.cfg.DataProviders[i].Tag == tag {
+			provider = &p.cfg.DataProviders[i]
+			break
+		}
+	}
+	if provider == nil {
+		panelError(w, 404, "未找到运行中的规则集；新规则请先保存并应用配置")
+		return
+	}
+	if r.URL.Path == "/api/v1/rule-refresh" {
+		if r.Method != "POST" {
+			panelError(w, 405, "POST required")
+			return
+		}
+		if p.manager == nil || p.manager.GetDataProvider(tag) == nil {
+			panelError(w, 400, "规则管理器不可用")
+			return
+		}
+		if err := p.manager.GetDataProvider(tag).RefreshRemote(); err != nil {
+			panelError(w, 400, err)
+			return
+		}
+		panelJSON(w, 200, map[string]any{"updated": true})
+		return
+	}
+	p.configMu.Lock()
+	defer p.configMu.Unlock()
+	info, err := os.Lstat(provider.File)
+	if err != nil {
+		panelError(w, 400, err)
+		return
+	}
+	if !info.Mode().IsRegular() || info.Size() > data_provider.MaxRuleBytes {
+		panelError(w, 400, "仅支持 16 MiB 以内的文本规则文件")
+		return
+	}
+	b, err := os.ReadFile(provider.File)
+	if err != nil {
+		panelError(w, 400, err)
+		return
+	}
+	kind := "domain"
+	for _, pc := range p.cfg.Plugins {
+		args, _ := pc.Args.(map[string]interface{})
+		for k, v := range args {
+			if !strings.Contains(fmt.Sprint(v), "provider:"+tag) {
+				continue
+			}
+			if k == "ip" || k == "ecs" || k == "client_ip" {
+				kind = "ip"
+			}
+			if k == "hosts" {
+				kind = "hosts"
+			}
+		}
+	}
+	if r.Method == "GET" {
+		value := string(b[:min(len(b), 2<<20)])
+		var status any
+		if p.manager != nil {
+			if dp := p.manager.GetDataProvider(tag); dp != nil {
+				status = dp.RemoteStatus()
+			}
+		}
+		count := 0
+		for _, line := range strings.Split(string(b), "\n") {
+			s := strings.TrimSpace(line)
+			if s != "" && !strings.HasPrefix(s, "#") {
+				count++
+			}
+		}
+		panelJSON(w, 200, map[string]any{"text": value, "sha256": configDigest(b), "tag": tag, "kind": kind, "count": count, "read_only": len(b) > 2<<20 || provider.URL != "", "status": status})
+		return
+	}
+	if provider.URL != "" {
+		panelError(w, 400, "远程规则由订阅维护；可修改 URL 或创建本地域名集")
+		return
+	}
+	if body.SHA256 != configDigest(b) {
+		panelError(w, 409, "规则文件已变化，请重新读取")
+		return
+	}
+	if kind == "domain" {
+		_, err = domain.ParseTextDomainFile([]byte(body.Text))
+	} else if kind == "ip" {
+		err = netlist.LoadFromText(netlist.NewList(), body.Text)
+	} else {
+		m := domain.NewMixMatcher[*hosts.IPs]()
+		m.SetDefaultMatcher(domain.MatcherFull)
+		err = domain.LoadFromTextReader[*hosts.IPs](m, strings.NewReader(body.Text), hosts.ParseIPs)
+	}
+	if err != nil {
+		panelError(w, 400, err)
+		return
+	}
+	backup := provider.File + ".panel-backup-" + time.Now().UTC().Format("20060102T150405.000000000")
+	if err = os.WriteFile(backup, b, 0600); err != nil {
+		panelError(w, 500, err)
+		return
+	}
+	if p.manager != nil && p.manager.GetDataProvider(tag) != nil {
+		err = p.manager.GetDataProvider(tag).ReplaceData([]byte(body.Text))
+	} else {
+		err = data_provider.AtomicWrite(provider.File, []byte(body.Text))
+	}
+	if err != nil {
+		panelError(w, 500, err)
+		return
+	}
+	panelJSON(w, 200, map[string]any{"saved": true, "sha256": configDigest([]byte(body.Text)), "backup": filepath.Base(backup)})
 }
 
 func validatePanelConfig(cfg *Config) error {

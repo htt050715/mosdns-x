@@ -60,7 +60,11 @@ func ExchangeParallel(ctx context.Context, qCtx *query_context.Context, upstream
 	q := qCtx.Q()
 	t := len(upstreams)
 	if t == 1 {
-		return upstreams[0].Exchange(ctx, q)
+		r, err := upstreams[0].Exchange(ctx, q)
+		if err == nil {
+			query_context.RecordAudit(ctx, "upstream", "", upstreams[0].Address())
+		}
+		return r, err
 	}
 
 	c := make(chan *parallelResult, t) // use buf chan to avoid blocking.
@@ -68,7 +72,7 @@ func ExchangeParallel(ctx context.Context, qCtx *query_context.Context, upstream
 	for _, u := range upstreams {
 		u := u
 		go func() {
-			r, err := u.Exchange(ctx, qCopy)
+			r, err := u.Exchange(ctx, qCopy.Copy())
 			c <- &parallelResult{
 				r:    r,
 				err:  err,
@@ -90,6 +94,7 @@ func ExchangeParallel(ctx context.Context, qCtx *query_context.Context, upstream
 			}
 
 			if res.from.Trusted() || res.r.Rcode == dns.RcodeSuccess {
+				query_context.RecordAudit(ctx, "upstream", "", res.from.Address())
 				return res.r, nil
 			}
 			continue

@@ -27,6 +27,7 @@ import (
 
 type Config struct {
 	configFile    string
+	checkOnly     bool
 	Log           mlog.LogConfig                     `yaml:"log"`
 	Include       []string                           `yaml:"include"`
 	DataProviders []data_provider.DataProviderConfig `yaml:"data_providers"`
@@ -89,10 +90,11 @@ type ServerListenerConfig struct {
 }
 
 type APIConfig struct {
-	HTTP             string `yaml:"http"`
-	WebUI            bool   `yaml:"webui"`
-	AuditCapacity    int    `yaml:"audit_capacity"`
-	AllowConfigWrite bool   `yaml:"allow_config_write"`
+	HTTP             string   `yaml:"http"`
+	WebUI            bool     `yaml:"webui"`
+	AuditCapacity    int      `yaml:"audit_capacity"`
+	AllowConfigWrite bool     `yaml:"allow_config_write"`
+	ApplyCommand     []string `yaml:"apply_command"`
 }
 
 type SecurityConfig struct {

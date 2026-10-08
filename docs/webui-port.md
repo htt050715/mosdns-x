@@ -1,5 +1,7 @@
 # mosdns-x 面板移植
 
+> 当前已更新为 management-v2，支持可视化上游分组、远程域名集、流量导向、规则编辑、响应 IP/TTL 与配置应用。请优先阅读 [最新管理说明](webui-management.md)。以下记录第一阶段移植时的范围与背景。
+
 这是可运行的第一阶段移植：保留 mosdns-x 的解析内核和配置格式，将 jasonxtt/mosdns 的 Vue 界面组件接入 mosdns-x 的管理 API。并非 jasonxtt 分支的完整功能合并。
 
 ## 使用

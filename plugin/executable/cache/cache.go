@@ -176,6 +176,11 @@ func (c *cachePlugin) Exec(ctx context.Context, qCtx *query_context.Context, nex
 		c.doLazyUpdate(msgKey, qCtx, next)
 	}
 	if cachedResp != nil { // cache hit
+		status := "hit"
+		if lazyHit {
+			status = "lazy-hit"
+		}
+		query_context.RecordAudit(ctx, "cache", c.Tag(), status)
 		c.hitTotal.Inc()
 		cachedResp.Id = q.Id // change msg id
 		c.L().Debug("cache hit", qCtx.InfoField())

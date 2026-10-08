@@ -11,10 +11,11 @@ PANEL_IP=${PANEL_IP:-192.168.50.110}
 PANEL_PORT=${PANEL_PORT:-9099}
 PREFLIGHT_PORT=${PREFLIGHT_PORT:-15453}
 PREFLIGHT_API_PORT=${PREFLIGHT_API_PORT:-19099}
-ENABLE_CONFIG_WRITE=${ENABLE_CONFIG_WRITE:-false}
+ENABLE_CONFIG_WRITE=${ENABLE_CONFIG_WRITE:-true}
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PAYLOAD=${1:-$SCRIPT_DIR/mosdns-x-webui-linux-amd64-production}
-EXPECTED_SHA256=${2:-273902953ef4b948ad609dc639e2403e373a88b1cc526637d10e20b112a0795f}
+EXPECTED_SHA256=${2:-}
+if [ -z "$EXPECTED_SHA256" ] && [ -f "$PAYLOAD.sha256" ]; then EXPECTED_SHA256=$(awk '{print $1; exit}' "$PAYLOAD.sha256"); fi
 BACKUP=
 STAGE=
 TEST_PID=
@@ -48,6 +49,7 @@ for tool in python3 curl dig sha256sum systemctl ss cp mktemp; do command -v "$t
 [ -f "$BINARY" ] && [ -f "$CONFIG" ] || fail 'Expected existing /etc/mosdns/mosdns and config.yaml.'
 [ ! -L "$BINARY" ] && [ ! -L "$CONFIG" ] || fail 'Symlink installs require a tailored deployment.'
 [ -n "$EXPECTED_SHA256" ] || fail 'Supply the SHA-256 from the deployment package.'
+[ "$ENABLE_CONFIG_WRITE" = false ] || [ -f "$SCRIPT_DIR/panel-apply.sh" ] || fail 'panel-apply.sh missing from deployment package.'
 case "$ENABLE_CONFIG_WRITE" in true|false) ;; *) fail 'ENABLE_CONFIG_WRITE must be true or false.';; esac
 python3 - "$PANEL_IP" "$PANEL_PORT" "$PREFLIGHT_PORT" "$PREFLIGHT_API_PORT" <<'PY'
 import ipaddress, sys
@@ -99,6 +101,8 @@ for line in lines:
         out.append(line)
 body = ''.join(out).rstrip()+'\n'
 api = '\napi:\n  http: "'+address+':'+port+'"\n  webui: true\n  audit_capacity: 3000\n  allow_config_write: '+writable+'\n'
+if writable == 'true':
+    api += '  apply_command:\n    - /usr/bin/systemd-run\n    - --quiet\n    - --collect\n    - --unit=mosdns-panel-apply\n    - /bin/sh\n    - /etc/mosdns/panel-apply.sh\n'
 pathlib.Path(candidate).write_text(body+api, encoding='utf-8')
 # Match only the two known main server listener addresses. No global string replacement.
 testbody, count = re.subn(r'(^\s+addr:\s*[\"\x27]?)0\.0\.0\.0:53([\"\x27]?\s*(?:#.*)?$)',
@@ -173,6 +177,9 @@ cp -a "$HERE/mosdns-original/mosdns" /etc/mosdns/.rollback-binary
 cp -a "$HERE/mosdns-original/config.yaml" /etc/mosdns/.rollback-config
 mv -f /etc/mosdns/.rollback-binary /etc/mosdns/mosdns
 mv -f /etc/mosdns/.rollback-config /etc/mosdns/config.yaml
+for name in panel-apply.sh config.yaml.panel-last-good .panel-apply-status.json; do
+  if [ -f "$HERE/mosdns-original/$name" ]; then cp -a "$HERE/mosdns-original/$name" "/etc/mosdns/$name"; else rm -f "/etc/mosdns/$name"; fi
+done
 systemctl reset-failed mosdns
 systemctl start mosdns
 sleep 2
@@ -188,6 +195,8 @@ CUTOVER=1
 systemctl stop "$SERVICE"
 mv -f "$STAGE/mosdns" "$BINARY"
 mv -f "$STAGE/config.yaml" "$CONFIG"
+if [ "$ENABLE_CONFIG_WRITE" = true ]; then cp "$SCRIPT_DIR/panel-apply.sh" "$ROOT/panel-apply.sh"; chmod 0700 "$ROOT/panel-apply.sh"; fi
+rm -f "$ROOT/.panel-apply-status.json"
 systemctl reset-failed "$SERVICE"
 systemctl start "$SERVICE"
 ready=0
@@ -205,6 +214,7 @@ if [ -f "$SCRIPT_DIR/configure-webui-firewall.sh" ]; then
   PANEL_IP="$PANEL_IP" PANEL_PORT="$PANEL_PORT" sh "$SCRIPT_DIR/configure-webui-firewall.sh"
 fi
 COMMITTED=1
+cp -p "$CONFIG" "$ROOT/config.yaml.panel-last-good"
 printf '%s\n' "$BACKUP" > "$ROOT/webui-last-backup.txt"
 say 'Deployment complete.'
 say "Panel: http://$PANEL_IP:$PANEL_PORT/"

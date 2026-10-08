@@ -47,6 +47,26 @@ var rootCmd = &cobra.Command{
 }
 
 func init() {
+	var checkFile, checkDir string
+	checkCmd := &cobra.Command{Use: "check", Short: "Validate configuration and initialize plugins without listening.", SilenceUsage: true, RunE: func(*cobra.Command, []string) error {
+		if checkDir != "" {
+			if err := os.Chdir(checkDir); err != nil {
+				return err
+			}
+		}
+		cfg, used, err := loadConfig(checkFile)
+		if err != nil {
+			return err
+		}
+		if err := mergeInclude(cfg, 0, []string{used}); err != nil {
+			return err
+		}
+		cfg.checkOnly = true
+		return RunMosdns(cfg)
+	}}
+	checkCmd.Flags().StringVarP(&checkFile, "config", "c", "", "config file")
+	checkCmd.Flags().StringVarP(&checkDir, "dir", "d", "", "working directory")
+	rootCmd.AddCommand(checkCmd)
 	sf := new(serverFlags)
 	startCmd := &cobra.Command{
 		Use:   "start [-c config_file] [-d working_dir]",

@@ -22,6 +22,7 @@ package data_provider
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -62,6 +63,8 @@ type DataProviderConfig struct {
 	Tag        string `yaml:"tag"`
 	File       string `yaml:"file"`
 	AutoReload bool   `yaml:"auto_reload"`
+	URL        string `yaml:"url,omitempty"`
+	Interval   int    `yaml:"interval,omitempty"` // minutes
 }
 
 type DataProvider struct {
@@ -72,7 +75,12 @@ type DataProvider struct {
 	lm        sync.Mutex
 	listeners map[DataListener]struct{}
 
-	sc *safe_close.SafeClose
+	sc         *safe_close.SafeClose
+	remote     DataProviderConfig
+	updateMu   sync.Mutex
+	statusMu   sync.Mutex
+	lastUpdate time.Time
+	lastError  string
 }
 
 func NewDataProvider(lg *zap.Logger, cfg DataProviderConfig) (*DataProvider, error) {
@@ -80,6 +88,7 @@ func NewDataProvider(lg *zap.Logger, cfg DataProviderConfig) (*DataProvider, err
 	dp.logger = lg
 	dp.file = cfg.File
 	dp.autoReload = cfg.AutoReload
+	dp.remote = cfg
 
 	dp.sc = safe_close.NewSafeClose()
 
@@ -90,12 +99,22 @@ func NewDataProvider(lg *zap.Logger, cfg DataProviderConfig) (*DataProvider, err
 }
 
 func (ds *DataProvider) init() error {
+	if ds.remote.URL != "" {
+		if err := ValidateRemoteURL(ds.remote.URL); err != nil {
+			return err
+		}
+		if _, err := os.Stat(ds.file); os.IsNotExist(err) {
+			if err := ds.RefreshRemote(); err != nil {
+				return err
+			}
+		}
+	}
 	_, err := ds.loadFromDisk()
 	if err != nil {
 		return err
 	}
 
-	if ds.autoReload {
+	if ds.autoReload && ds.remote.URL == "" {
 		if err := ds.startFsWatcher(); err != nil {
 			return fmt.Errorf("failed to start fs watcher, %w", err)
 		}
@@ -167,81 +186,47 @@ func (ds *DataProvider) startFsWatcher() error {
 	if err != nil {
 		return err
 	}
-	if err := w.Add(ds.file); err != nil {
+	file, err := filepath.Abs(ds.file)
+	if err != nil {
+		w.Close()
+		return err
+	}
+	if err := w.Add(filepath.Dir(file)); err != nil {
+		w.Close()
 		return err
 	}
 
 	go func() {
 		defer w.Close()
 
-		var delayReloadTimer *time.Timer
+		timer := time.NewTimer(time.Hour)
+		timer.Stop()
+		defer timer.Stop()
+		var reload <-chan time.Time
 		for {
 			select {
 			case e, ok := <-w.Events:
 				if !ok {
-					if delayReloadTimer != nil {
-						delayReloadTimer.Stop()
-						delayReloadTimer = nil
-					}
 					return
 				}
-				ds.logger.Info(
-					"fs event",
-					zap.Stringer("event", e.Op),
-					zap.String("file", e.Name),
-				)
-
-				if delayReloadTimer != nil {
-					delayReloadTimer.Reset(time.Second)
+				if filepath.Clean(e.Name) != file {
+					continue
+				}
+				timer.Reset(time.Second)
+				reload = timer.C
+			case <-reload:
+				reload = nil
+				if b, err := ds.loadFromDisk(); err != nil {
+					ds.logger.Error("failed to reload file", zap.String("file", ds.file), zap.Error(err))
 				} else {
-					delayReloadTimer = time.AfterFunc(time.Second, func() {
-						if hasOp(e, fsnotify.Remove) {
-							_ = w.Remove(ds.file)
-							if err := w.Add(ds.file); err != nil {
-								ds.logger.Error(
-									"failed to re-watch file, auto reload may not work anymore",
-									zap.String("file", ds.file),
-									zap.Error(err),
-								)
-							}
-						}
-
-						ds.logger.Info(
-							"reloading file",
-							zap.String("file", ds.file),
-						)
-						if v, err := ds.loadFromDisk(); err != nil {
-							ds.logger.Error(
-								"failed to reload file",
-								zap.String("file", ds.file),
-								zap.Error(err),
-							)
-						} else {
-							ds.logger.Info(
-								"file reloaded",
-								zap.String("file", ds.file),
-							)
-							ds.pushData(v)
-						}
-
-						delayReloadTimer = nil
-					})
+					ds.pushData(b)
 				}
-
 			case err, ok := <-w.Errors:
-				if delayReloadTimer != nil {
-					delayReloadTimer.Stop()
-					delayReloadTimer = nil
-				}
 				if !ok {
 					return
 				}
 				ds.logger.Error("fs notify error", zap.Error(err))
 			case <-ds.sc.ReceiveCloseSignal():
-				if delayReloadTimer != nil {
-					delayReloadTimer.Stop()
-					delayReloadTimer = nil
-				}
 				return
 			}
 		}

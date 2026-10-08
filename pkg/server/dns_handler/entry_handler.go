@@ -122,6 +122,7 @@ func (h *EntryHandler) ServeDNS(ctx context.Context, req *dns.Msg, meta *query_c
 	err := h.opts.Entry.Exec(ctx, qCtx, nil)
 	respMsg := qCtx.R()
 	if err != nil {
+		query_context.RecordAudit(ctx, "error", "", err.Error())
 		h.opts.Logger.Warn("entry returned an err", qCtx.InfoField(), zap.Error(err))
 	} else {
 		h.opts.Logger.Debug("entry returned", qCtx.InfoField())
