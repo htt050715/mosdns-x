@@ -24,5 +24,15 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Test Build
-        run: go build
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+
+      - name: Build embedded WebUI and check binary
+        run: |
+          npm ci --prefix webui --no-audit --no-fund
+          npm run build --prefix webui
+          go test ./coremain
+          go build

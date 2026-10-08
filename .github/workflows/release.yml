@@ -28,6 +28,12 @@ jobs:
         with:
           python-version: '3.8'
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+
       - name: Build
         run: |
           echo "TAG_NAME=v$(date +'%y.%m.%d')" >> "$GITHUB_ENV"

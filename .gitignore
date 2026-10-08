@@ -23,3 +23,7 @@ release/
 
 # test utils
 testutils/
+
+# WebUI development and runtime backups
+webui/node_modules/
+*.panel-backup-*

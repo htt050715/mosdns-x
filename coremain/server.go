@@ -67,8 +67,12 @@ func (m *Mosdns) startServers(cfg *ServerConfig) error {
 		return fmt.Errorf("failed to init entry handler, %w", err)
 	}
 
+	var handler D.Handler = dnsHandler
+	if m.panel != nil {
+		handler = &auditedHandler{next: handler, panel: m.panel, entry: cfg.Exec}
+	}
 	for _, lc := range cfg.Listeners {
-		if err := m.startServerListener(lc, dnsHandler); err != nil {
+		if err := m.startServerListener(lc, handler); err != nil {
 			return err
 		}
 	}

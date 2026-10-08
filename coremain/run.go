@@ -22,6 +22,7 @@ package coremain
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -149,6 +150,11 @@ func loadConfig(filePath string) (*Config, string, error) {
 	if err := v.Unmarshal(cfg, decoderOpt); err != nil {
 		return nil, "", fmt.Errorf("failed to unmarshal config: %w", err)
 	}
+	path, err := filepath.Abs(v.ConfigFileUsed())
+	if err != nil {
+		return nil, "", err
+	}
+	cfg.configFile = path
 	return cfg, v.ConfigFileUsed(), nil
 }
 

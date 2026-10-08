@@ -40,6 +40,7 @@ import (
 )
 
 type Mosdns struct {
+	panel  *webPanel
 	logger *zap.Logger
 
 	// Data
@@ -79,6 +80,13 @@ func RunMosdns(cfg *Config) error {
 	m.httpAPIMux.HandleFunc("/debug/pprof/profile", pprof.Profile)
 	m.httpAPIMux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 	m.httpAPIMux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	if cfg.API.WebUI {
+		if cfg.API.HTTP == "" {
+			return errors.New("api.webui requires api.http")
+		}
+		m.panel = newWebPanel(cfg, m.metricsReg)
+		m.panel.register(m.httpAPIMux)
+	}
 
 	// Init data manager
 	dupTag := make(map[string]struct{})

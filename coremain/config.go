@@ -26,6 +26,7 @@ import (
 )
 
 type Config struct {
+	configFile    string
 	Log           mlog.LogConfig                     `yaml:"log"`
 	Include       []string                           `yaml:"include"`
 	DataProviders []data_provider.DataProviderConfig `yaml:"data_providers"`
@@ -88,7 +89,10 @@ type ServerListenerConfig struct {
 }
 
 type APIConfig struct {
-	HTTP string `yaml:"http"`
+	HTTP             string `yaml:"http"`
+	WebUI            bool   `yaml:"webui"`
+	AuditCapacity    int    `yaml:"audit_capacity"`
+	AllowConfigWrite bool   `yaml:"allow_config_write"`
 }
 
 type SecurityConfig struct {

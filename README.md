@@ -1,5 +1,7 @@
 ## Mosdns-x
 
+本分支新增可选 Vue 管理面板：概览、查询日志、缓存统计、上游/规则查看及主配置编辑。启用方式和移植范围见 [面板说明](docs/webui-port.md)，可运行示例见 [examples/webui.yaml](examples/webui.yaml)。
+
 Mosdns-x 是一个用 Go 编写的高性能 DNS 转发器，支持运行插件流水线，用户可以按需定制 DNS 处理逻辑。
 
 **支持监听与请求以下类型的 DNS：**

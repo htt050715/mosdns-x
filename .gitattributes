@@ -1,2 +1,4 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+webui/** text eol=lf
+coremain/www/** text eol=lf

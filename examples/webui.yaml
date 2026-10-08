@@ -1,0 +1,36 @@
+# Start: mosdns start -c examples/webui.yaml
+# Dashboard: http://127.0.0.1:9099/
+log:
+  level: info
+api:
+  http: 127.0.0.1:9099
+  webui: true
+  audit_capacity: 1000
+  allow_config_write: false
+plugins:
+  - tag: dns_cache
+    type: cache
+    args:
+      size: 1024
+      lazy_cache_ttl: 86400
+  - tag: forward
+    type: fast_forward
+    args:
+      upstream:
+        - addr: https://dns.alidns.com/dns-query
+          bootstrap: 223.5.5.5
+        - addr: https://cloudflare-dns.com/dns-query
+          bootstrap: 1.1.1.1
+  - tag: main
+    type: sequence
+    args:
+      exec:
+        - dns_cache
+        - forward
+servers:
+  - exec: main
+    listeners:
+      - protocol: udp
+        addr: 127.0.0.1:15353
+      - protocol: tcp
+        addr: 127.0.0.1:15353

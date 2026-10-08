@@ -3,6 +3,7 @@ import argparse
 import datetime
 import logging
 import os
+import shutil
 import subprocess
 import zipfile
 
@@ -107,6 +108,12 @@ def go_build():
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
+
+    npm = shutil.which('npm')
+    if not npm:
+        raise RuntimeError('Node.js/npm is required to build the embedded WebUI')
+    subprocess.check_call([npm, 'ci', '--no-audit', '--no-fund'], cwd='webui')
+    subprocess.check_call([npm, 'run', 'build'], cwd='webui')
 
     if len(RELEASE_DIR) != 0:
         if not os.path.exists(RELEASE_DIR):
