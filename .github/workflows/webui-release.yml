@@ -3,6 +3,11 @@ name: Release WebUI installer
 on:
   push:
     tags: ['webui-v*']
+    branches: [main]
+    paths:
+      - install-webui.sh
+      - .github/workflows/webui-release.yml
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -12,24 +17,47 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: Resolve release version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            tag=$(python3 -c 'import re; print(re.search(r"VERSION=\$\{MOSDNS_WEBUI_VERSION:-([^}]+)\}", open("install-webui.sh").read())[1])')
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo 'exists=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'exists=false' >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/setup-go@v6
+        if: steps.version.outputs.exists != 'true'
         with:
           go-version: '1.26.x'
       - uses: actions/setup-node@v4
+        if: steps.version.outputs.exists != 'true'
         with:
           node-version: '22'
           cache: npm
           cache-dependency-path: webui/package-lock.json
       - name: Validate installer and backend
+        if: steps.version.outputs.exists != 'true'
         run: |
           sh -n install-webui.sh scripts/deploy/deploy-mosdns-webui.sh scripts/deploy/panel-apply.sh
           python3 -m unittest discover -s scripts/deploy/tests -v
           go test ./...
       - name: Build Vue and Linux packages
+        if: steps.version.outputs.exists != 'true'
         run: python3 scripts/build-webui-release.py
       - uses: softprops/action-gh-release@v2
+        if: steps.version.outputs.exists != 'true'
         with:
-          name: Mosdns-x WebUI ${{ github.ref_name }}
+          name: Mosdns-x WebUI ${{ steps.version.outputs.tag }}
+          tag_name: ${{ steps.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
