@@ -39,7 +39,7 @@ trap 'exit 130' HUP INT TERM
 [ "$(id -u)" = 0 ] || fail 'Run as root (sudo sh deploy-mosdns-webui.sh ...).'
 [ "$(uname -s)" = Linux ] || fail 'Requires Linux.'
 case "$(uname -m)" in x86_64|amd64) ARCH=amd64;; aarch64|arm64) ARCH=arm64;; *) fail 'Supported architectures: amd64 / arm64.';; esac
-for tool in python3 curl dig sha256sum systemctl ss cp mktemp; do command -v "$tool" >/dev/null 2>&1 || fail "Required command missing: $tool"; done
+for tool in python3 curl dig sha256sum systemctl systemd-run ss cp mktemp; do command -v "$tool" >/dev/null 2>&1 || fail "Required command missing: $tool"; done
 if [ "${MOSDNS_DETECTED:-0}" != 1 ]; then
   detected=$(python3 "$SCRIPT_DIR/detect-install.py")
   eval "$detected"

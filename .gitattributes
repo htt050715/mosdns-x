@@ -3,3 +3,5 @@
 webui/** text eol=lf
 coremain/www/** text eol=lf
 scripts/deploy/*.sh text eol=lf
+*.sh text eol=lf
+*.py text eol=lf
