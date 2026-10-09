@@ -13,7 +13,7 @@ sudo apt-get update && sudo apt-get install -y curl python3 dnsutils iproute2
 一条命令下载并安装（root 登录时去掉 `sudo`）：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/htt050715/mosdns-x/main/install-webui.sh -o /tmp/install-mosdns-webui.sh && sudo sh /tmp/install-mosdns-webui.sh
+curl -fsSL https://ghproxy.05160715.xyz/https://raw.githubusercontent.com/htt050715/mosdns-x/main/install-webui.sh -o /tmp/install-mosdns-webui.sh && sudo sh /tmp/install-mosdns-webui.sh
 ```
 
 安装器读取正在运行的 systemd 服务和 `/proc` 启动参数，自动识别实际二进制、工作目录和配置。标准 `/etc/mosdns/mosdns start --as-service -d /etc/mosdns` 会识别为 `/etc/mosdns/mosdns` 与 `/etc/mosdns/config.yaml`。
@@ -27,6 +27,14 @@ sudo env PANEL_IP=192.168.50.110 PANEL_PORT=9099 sh /tmp/install-mosdns-webui.sh
 面板提供配置写入和服务重启能力，只应在可信局域网或经认证的反向代理下使用。安装器不会修改防火墙；现有防火墙策略继续保留。
 
 ## 先检测，不改服务
+
+安装入口、检测脚本、Release 二进制包和 `SHA256SUMS` 默认通过 `https://ghproxy.05160715.xyz/原始GitHub链接` 加速下载。脚本内加速下载失败时依次回退官方下载地址与官方资产 API，校验流程保持一致，API 请求使用官方地址。
+
+可用 `MOSDNS_GITHUB_PROXY` 更换 HTTPS 加速前缀，或设为空关闭加速（安装入口本身也可直接从 `https://raw.githubusercontent.com/htt050715/mosdns-x/main/install-webui.sh` 下载）：
+
+```sh
+sudo env MOSDNS_GITHUB_PROXY="" sh /tmp/install-mosdns-webui.sh
+```
 
 ```sh
 sudo sh /tmp/install-mosdns-webui.sh --detect-only
