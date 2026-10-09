@@ -23,15 +23,20 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 130' HUP INT TERM
-curl --fail --location --retry 3 --proto '=https' --tlsv1.2 "https://raw.githubusercontent.com/$REPO/$VERSION/scripts/deploy/detect-install.py" -o "$TMP/detect-install.py"
+download() {
+  # HTTP/1.1 avoids incomplete HTTP/2 streams on some router/proxy paths.
+  curl --http1.1 --fail --location --silent --show-error --retry 3 --retry-all-errors \
+    --retry-max-time 300 --connect-timeout 15 --max-time 180 --proto '=https' --tlsv1.2 "$1" -o "$2"
+}
+download "https://raw.githubusercontent.com/$REPO/$VERSION/scripts/deploy/detect-install.py" "$TMP/detect-install.py"
 detected=$(python3 "$TMP/detect-install.py")
 eval "$detected"
 printf 'Detected service: %s\nBinary: %s\nConfig: %s\nWorking directory: %s\nPanel: http://%s:%s/\n' "$MOSDNS_SERVICE" "$MOSDNS_BINARY" "$MOSDNS_CONFIG" "$MOSDNS_ROOT" "$PANEL_IP" "$PANEL_PORT"
 if [ "${1:-}" = --detect-only ]; then exit 0; fi
 asset=mosdns-x-webui-linux-$arch.tar.gz
 url=https://github.com/$REPO/releases/download/$VERSION
-curl --fail --location --retry 3 --proto '=https' --tlsv1.2 "$url/$asset" -o "$TMP/package.tar.gz"
-curl --fail --location --retry 3 --proto '=https' --tlsv1.2 "$url/SHA256SUMS" -o "$TMP/SHA256SUMS"
+download "$url/$asset" "$TMP/package.tar.gz"
+download "$url/SHA256SUMS" "$TMP/SHA256SUMS"
 hash=$(awk -v name="$asset" '$2 == name {print $1}' "$TMP/SHA256SUMS")
 [ "${#hash}" = 64 ] || { echo 'Missing package SHA-256.' >&2; exit 1; }
 printf '%s  %s\n' "$hash" "$TMP/package.tar.gz" > "$TMP/package.sha256"
