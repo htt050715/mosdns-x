@@ -1,5 +1,17 @@
 ## Mosdns-x
 
+### WebUI 面板与一键安装
+
+支持配置格式化/在线编辑与安全应用、上游分组、远程规则集、可视化域名分流、查询日志和返回 IP。完整安装说明见 [一键安装文档](docs/webui-install.md)，下载见 [本仓库 Releases](https://github.com/htt050715/mosdns-x/releases)。
+
+已有 Linux/systemd 原生 mosdns-x（如 `/etc/mosdns`）可执行：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/htt050715/mosdns-x/main/install-webui.sh -o /tmp/install-mosdns-webui.sh && sudo sh /tmp/install-mosdns-webui.sh
+```
+
+自动检测当前服务和配置路径，保留已有规则与上游，先预检再备份升级，失败自动回滚。已有面板地址会保留；首次安装默认 `127.0.0.1:9099`，局域网访问用 `sudo env PANEL_IP=本机局域网IP sh /tmp/install-mosdns-webui.sh`。root 用户可去掉 `sudo`。支持 amd64/arm64；Docker、OpenWrt/procd、v5 和 include 配置不适用。
+
 本分支新增可选 Vue 管理面板：概览、查询日志、缓存统计、上游/规则查看及主配置编辑。启用方式和移植范围见 [面板说明](docs/webui-port.md)，可运行示例见 [examples/webui.yaml](examples/webui.yaml)。
 
 Mosdns-x 是一个用 Go 编写的高性能 DNS 转发器，支持运行插件流水线，用户可以按需定制 DNS 处理逻辑。

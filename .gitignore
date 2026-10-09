@@ -16,6 +16,8 @@ vendor/
 
 # release dir
 release/
+release-webui/
+__pycache__/
 
 # ide
 .vscode/

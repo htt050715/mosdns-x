@@ -1,0 +1,37 @@
+name: Release WebUI installer
+
+on:
+  push:
+    tags: ['webui-v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+      - name: Validate installer and backend
+        run: |
+          sh -n install-webui.sh scripts/deploy/deploy-mosdns-webui.sh scripts/deploy/panel-apply.sh
+          python3 -m unittest discover -s scripts/deploy/tests -v
+          go test ./...
+      - name: Build Vue and Linux packages
+        run: python3 scripts/build-webui-release.py
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Mosdns-x WebUI ${{ github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            release-webui/mosdns-x-webui-linux-*.tar.gz
+            release-webui/SHA256SUMS

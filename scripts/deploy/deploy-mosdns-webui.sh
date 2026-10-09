@@ -3,12 +3,6 @@
 # Preserves DNS policy; verifies temporary listeners before the brief service cutover.
 set -eu
 umask 077
-SERVICE=mosdns
-ROOT=/etc/mosdns
-BINARY=$ROOT/mosdns
-CONFIG=$ROOT/config.yaml
-PANEL_IP=${PANEL_IP:-192.168.50.110}
-PANEL_PORT=${PANEL_PORT:-9099}
 PREFLIGHT_PORT=${PREFLIGHT_PORT:-15453}
 PREFLIGHT_API_PORT=${PREFLIGHT_API_PORT:-19099}
 ENABLE_CONFIG_WRITE=${ENABLE_CONFIG_WRITE:-true}
@@ -43,10 +37,22 @@ trap cleanup EXIT
 trap 'exit 130' HUP INT TERM
 
 [ "$(id -u)" = 0 ] || fail 'Run as root (sudo sh deploy-mosdns-webui.sh ...).'
-[ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ] || fail 'This payload is for Linux x86_64.'
+[ "$(uname -s)" = Linux ] || fail 'Requires Linux.'
+case "$(uname -m)" in x86_64|amd64) ARCH=amd64;; aarch64|arm64) ARCH=arm64;; *) fail 'Supported architectures: amd64 / arm64.';; esac
 for tool in python3 curl dig sha256sum systemctl ss cp mktemp; do command -v "$tool" >/dev/null 2>&1 || fail "Required command missing: $tool"; done
+if [ "${MOSDNS_DETECTED:-0}" != 1 ]; then
+  detected=$(python3 "$SCRIPT_DIR/detect-install.py")
+  eval "$detected"
+fi
+SERVICE=$MOSDNS_SERVICE
+ROOT=$MOSDNS_ROOT
+BINARY=$MOSDNS_BINARY
+CONFIG=$MOSDNS_CONFIG
+PANEL_IP=${PANEL_IP:-127.0.0.1}
+PANEL_PORT=${PANEL_PORT:-9099}
+EXEC_START=$(systemctl show "$SERVICE" --property=ExecStart --value)
 [ -f "$PAYLOAD" ] || fail "Binary not found: $PAYLOAD"
-[ -f "$BINARY" ] && [ -f "$CONFIG" ] || fail 'Expected existing /etc/mosdns/mosdns and config.yaml.'
+[ -f "$BINARY" ] && [ -f "$CONFIG" ] || fail "Expected existing $BINARY and $CONFIG."
 [ ! -L "$BINARY" ] && [ ! -L "$CONFIG" ] || fail 'Symlink installs require a tailored deployment.'
 [ -n "$EXPECTED_SHA256" ] || fail 'Supply the SHA-256 from the deployment package.'
 [ "$ENABLE_CONFIG_WRITE" = false ] || [ -f "$SCRIPT_DIR/panel-apply.sh" ] || fail 'panel-apply.sh missing from deployment package.'
@@ -60,8 +66,7 @@ assert all(1024 <= p <= 65535 for p in ports)
 assert len(set(ports)) == 3
 PY
 systemctl is-active --quiet "$SERVICE" || fail 'Existing mosdns service must be running before deployment.'
-systemctl show "$SERVICE" --property=ExecStart --value | grep -F '/etc/mosdns/mosdns start --as-service -d /etc/mosdns' >/dev/null || fail 'Service command differs from this machine; inspect before deploying.'
-[ "$(systemctl show "$SERVICE" --property=FragmentPath --value)" = /etc/systemd/system/mosdns.service ] || fail 'Unexpected service unit.'
+printf '%s\n' "$EXEC_START" | grep -F "$BINARY" >/dev/null || fail "Service $SERVICE does not use detected binary $BINARY."
 for port in "$PREFLIGHT_PORT" "$PREFLIGHT_API_PORT"; do
   [ -z "$(ss -H -lntu "sport = :$port")" ] || fail "Preflight port $port is already occupied."
 done
@@ -79,9 +84,9 @@ chmod 0755 "$STAGE/mosdns"
 "$STAGE/mosdns" version
 
 say 'Preparing candidate config; original rules/upstreams/ports remain in place.'
-python3 - "$CONFIG" "$STAGE/config.yaml" "$STAGE/preflight.yaml" "$PANEL_IP" "$PANEL_PORT" "$PREFLIGHT_PORT" "$PREFLIGHT_API_PORT" "$ENABLE_CONFIG_WRITE" <<'PY'
-import pathlib, re, sys
-source, candidate, preflight, address, port, dns_port, api_port, writable = sys.argv[1:]
+python3 - "$CONFIG" "$STAGE/config.yaml" "$STAGE/preflight.yaml" "$PANEL_IP" "$PANEL_PORT" "$PREFLIGHT_PORT" "$PREFLIGHT_API_PORT" "$ENABLE_CONFIG_WRITE" "$SERVICE" "$BINARY" <<'PY'
+import json, pathlib, re, sys
+source, candidate, preflight, address, port, dns_port, api_port, writable, service, binary = sys.argv[1:]
 original = pathlib.Path(source).read_text(encoding='utf-8')
 if re.search(r'^include\s*:', original, re.M):
     raise SystemExit('This installer expects servers in the main YAML file; include requires tailored preflight.')
@@ -102,7 +107,10 @@ for line in lines:
 body = ''.join(out).rstrip()+'\n'
 api = '\napi:\n  http: "'+address+':'+port+'"\n  webui: true\n  audit_capacity: 3000\n  allow_config_write: '+writable+'\n'
 if writable == 'true':
-    api += '  apply_command:\n    - /usr/bin/systemd-run\n    - --quiet\n    - --collect\n    - --unit=mosdns-panel-apply\n    - /bin/sh\n    - /etc/mosdns/panel-apply.sh\n'
+    args = ['/usr/bin/systemd-run', '--quiet', '--collect', '--unit='+service.removesuffix('.service')+'-panel-apply',
+            '--setenv=MOSDNS_SERVICE='+service, '--setenv=MOSDNS_BINARY='+binary,
+            '/bin/sh', str(pathlib.Path(source).parent / 'panel-apply.sh')]
+    api += '  apply_command:\n' + ''.join('    - '+json.dumps(arg)+'\n' for arg in args)
 pathlib.Path(candidate).write_text(body+api, encoding='utf-8')
 # Match only the two known main server listener addresses. No global string replacement.
 testbody, count = re.subn(r'(^\s+addr:\s*[\"\x27]?)0\.0\.0\.0:53([\"\x27]?\s*(?:#.*)?$)',
@@ -131,11 +139,11 @@ probe_dns() {
 }
 probe_api() {
   curl --fail --silent --max-time 3 --noproxy '*' "http://$1/api/v1/system/info" > "$STAGE/health.json" || return 1
-  python3 - "$STAGE/health.json" <<'PY'
+  python3 - "$STAGE/health.json" "$ARCH" <<'PY'
 import json, sys
 with open(sys.argv[1]) as f: data=json.load(f)
 assert data['version'] in ('4.6.0-webui-preview', '4.6.0'), data
-assert 'config_write' in data and data['platform'] == 'linux/amd64', data
+assert 'config_write' in data and data['platform'] == 'linux/'+sys.argv[2], data
 PY
 }
 
@@ -156,34 +164,48 @@ kill "$TEST_PID"
 wait "$TEST_PID" 2>/dev/null || true
 TEST_PID=
 
+if [ "${PREFLIGHT_ONLY:-false}" = true ]; then
+  say 'Preflight passed; existing service unchanged.'
+  exit 0
+fi
+
 mkdir -p /var/backups/mosdns-webui
 BACKUP=$(mktemp -d /var/backups/mosdns-webui/"$(date +%Y%m%d-%H%M%S)".XXXXXX)
 cp -a "$ROOT" "$BACKUP/mosdns-original"
-cp -a /etc/systemd/system/mosdns.service "$BACKUP/mosdns.service"
+fragment=$(systemctl show "$SERVICE" --property=FragmentPath --value)
+[ ! -f "$fragment" ] || cp -a "$fragment" "$BACKUP/service-original"
+python3 - "$BACKUP/install.env" "$SERVICE" "$ROOT" "$BINARY" "$CONFIG" <<'PY'
+import pathlib, shlex, sys
+keys = ['SERVICE', 'ROOT', 'BINARY', 'CONFIG']
+pathlib.Path(sys.argv[1]).write_text(''.join(k+'='+shlex.quote(v)+'\n' for k,v in zip(keys,sys.argv[2:])))
+PY
 cat > "$BACKUP/rollback.sh" <<'SH'
 #!/bin/sh
 set -eu
 [ "$(id -u)" = 0 ] || { echo 'Run as root.' >&2; exit 1; }
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-[ -f "$HERE/mosdns-original/mosdns" ] && [ -f "$HERE/mosdns-original/config.yaml" ]
-systemctl stop mosdns
+. "$HERE/install.env"
+binary_name=$(basename -- "$BINARY")
+config_name=$(basename -- "$CONFIG")
+[ -f "$HERE/mosdns-original/$binary_name" ] && [ -f "$HERE/mosdns-original/$config_name" ]
+systemctl stop "$SERVICE"
 if [ -f "$HERE/firewall-created" ]; then
   systemctl disable --now mosdns-webui-firewall.service || true
   rm -f /etc/systemd/system/mosdns-webui-firewall.service /etc/mosdns-webui-firewall/allow-lan.sh
   rmdir /etc/mosdns-webui-firewall 2>/dev/null || true
   systemctl daemon-reload
 fi
-cp -a "$HERE/mosdns-original/mosdns" /etc/mosdns/.rollback-binary
-cp -a "$HERE/mosdns-original/config.yaml" /etc/mosdns/.rollback-config
-mv -f /etc/mosdns/.rollback-binary /etc/mosdns/mosdns
-mv -f /etc/mosdns/.rollback-config /etc/mosdns/config.yaml
-for name in panel-apply.sh config.yaml.panel-last-good .panel-apply-status.json; do
-  if [ -f "$HERE/mosdns-original/$name" ]; then cp -a "$HERE/mosdns-original/$name" "/etc/mosdns/$name"; else rm -f "/etc/mosdns/$name"; fi
+cp -a "$HERE/mosdns-original/$binary_name" "$ROOT/.rollback-binary"
+cp -a "$HERE/mosdns-original/$config_name" "$ROOT/.rollback-config"
+mv -f "$ROOT/.rollback-binary" "$BINARY"
+mv -f "$ROOT/.rollback-config" "$CONFIG"
+for name in panel-apply.sh "$config_name.panel-last-good" .panel-apply-status.json; do
+  if [ -f "$HERE/mosdns-original/$name" ]; then cp -a "$HERE/mosdns-original/$name" "$ROOT/$name"; else rm -f "$ROOT/$name"; fi
 done
-systemctl reset-failed mosdns
-systemctl start mosdns
+systemctl reset-failed "$SERVICE"
+systemctl start "$SERVICE"
 sleep 2
-systemctl is-active --quiet mosdns
+systemctl is-active --quiet "$SERVICE"
 echo "Restored binary/config from $HERE. Rules and service unit were not changed by the installer."
 SH
 chmod 0700 "$BACKUP/rollback.sh"
@@ -209,13 +231,13 @@ probe_dns 127.0.0.1 53 || fail 'Production UDP/TCP DNS health check failed.'
 curl --fail --silent --max-time 3 --noproxy '*' "http://$PANEL_IP:$PANEL_PORT/" >/dev/null || fail 'Dashboard page failed.'
 sleep 2
 systemctl is-active --quiet "$SERVICE" || fail 'Service exited after health checks.'
-if [ -f "$SCRIPT_DIR/configure-webui-firewall.sh" ]; then
+if [ "${CONFIGURE_LAN_FIREWALL:-false}" = true ] && [ -f "$SCRIPT_DIR/configure-webui-firewall.sh" ]; then
   [ -f /etc/systemd/system/mosdns-webui-firewall.service ] || touch "$BACKUP/firewall-created"
   PANEL_IP="$PANEL_IP" PANEL_PORT="$PANEL_PORT" sh "$SCRIPT_DIR/configure-webui-firewall.sh"
 fi
-COMMITTED=1
-cp -p "$CONFIG" "$ROOT/config.yaml.panel-last-good"
+cp -p "$CONFIG" "$CONFIG.panel-last-good"
 printf '%s\n' "$BACKUP" > "$ROOT/webui-last-backup.txt"
+COMMITTED=1
 say 'Deployment complete.'
 say "Panel: http://$PANEL_IP:$PANEL_PORT/"
 say 'DNS: existing UDP/TCP port 53, original routing policy retained.'

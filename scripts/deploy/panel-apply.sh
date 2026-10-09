@@ -8,7 +8,8 @@ STATUS=$3
 ROOT=$(dirname -- "$CONFIG")
 SERVICE=${MOSDNS_SERVICE:-mosdns}
 DNS_PORT=${MOSDNS_DNS_PORT:-53}
-GOOD=$ROOT/config.yaml.panel-last-good
+GOOD=$CONFIG.panel-last-good
+BINARY=${MOSDNS_BINARY:-$ROOT/mosdns}
 API=$(python3 - "$CONFIG" <<'PY'
 import pathlib,re,sys
 s=pathlib.Path(sys.argv[1]).read_text()
@@ -41,7 +42,7 @@ restore() {
 }
 trap restore EXIT HUP INT TERM
 sleep 2
-"$ROOT/mosdns" check -d "$ROOT" -c "$CONFIG" >"$ROOT/.panel-check.log" 2>&1
+"$BINARY" check -d "$ROOT" -c "$CONFIG" >"$ROOT/.panel-check.log" 2>&1
 systemctl restart "$SERVICE"
 ready=0
 for attempt in 1 2 3 4 5 6 7 8 9 10; do
