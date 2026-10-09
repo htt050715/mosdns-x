@@ -10,7 +10,7 @@
 curl -fsSL https://ghproxy.05160715.xyz/https://raw.githubusercontent.com/htt050715/mosdns-x/main/install-webui.sh -o /tmp/install-mosdns-webui.sh && sudo sh /tmp/install-mosdns-webui.sh
 ```
 
-自动检测当前服务和配置路径，保留已有规则与上游，先预检再备份升级，失败自动回滚。默认使用 `ghproxy.05160715.xyz` 加速源文件、Release 包和校验文件下载，失败回退官方地址；设置 `MOSDNS_GITHUB_PROXY=""` 可关闭加速。已有面板地址会保留；首次安装默认 `127.0.0.1:9099`，局域网访问用 `sudo env PANEL_IP=本机局域网IP sh /tmp/install-mosdns-webui.sh`。root 用户可去掉 `sudo`。支持 amd64/arm64；Docker、OpenWrt/procd、v5 和 include 配置不适用。
+自动检测当前服务和配置路径，保留已有规则与上游，先预检再备份升级，失败自动回滚。默认使用 `ghproxy.05160715.xyz` 加速源文件、Release 包和校验文件下载，失败回退官方地址；设置 `MOSDNS_GITHUB_PROXY=""` 可关闭加速。默认自动识别并监听本机局域网 IPv4 的 `9099` 端口，局域网设备可直接访问 `http://本机局域网IP:9099/`；已有明确的非回环 IPv4 地址和端口会保留。可用 `sudo env PANEL_IP=本机局域网IP sh /tmp/install-mosdns-webui.sh` 手动指定。root 用户可去掉 `sudo`。支持 amd64/arm64；Docker、OpenWrt/procd、v5 和 include 配置不适用。
 
 本分支新增可选 Vue 管理面板：概览、查询日志、缓存统计、上游/规则查看及主配置编辑。启用方式和移植范围见 [面板说明](docs/webui-port.md)，可运行示例见 [examples/webui.yaml](examples/webui.yaml)。
 

@@ -3,12 +3,12 @@
 set -eu
 umask 077
 REPO=${MOSDNS_REPO:-htt050715/mosdns-x}
-VERSION=${MOSDNS_WEBUI_VERSION:-webui-v2026.10.09}
+VERSION=${MOSDNS_WEBUI_VERSION:-webui-v2026.10.09.1}
 GITHUB_PROXY=${MOSDNS_GITHUB_PROXY-https://ghproxy.05160715.xyz}
 GITHUB_PROXY=${GITHUB_PROXY%/}
 [ "$(id -u)" = 0 ] || { echo 'Run with sudo sh install-webui.sh' >&2; exit 1; }
 [ "$(uname -s)" = Linux ] || { echo 'Requires Linux/systemd.' >&2; exit 1; }
-for tool in curl python3 systemctl tar sha256sum; do
+for tool in curl python3 systemctl tar sha256sum ip; do
   command -v "$tool" >/dev/null 2>&1 || { echo "Missing $tool; install it first." >&2; exit 1; }
 done
 case "$(uname -m)" in x86_64|amd64) arch=amd64;; aarch64|arm64) arch=arm64;; *) echo 'Supported architectures: amd64 / arm64.' >&2; exit 1;; esac

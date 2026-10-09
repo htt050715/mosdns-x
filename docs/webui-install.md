@@ -18,7 +18,7 @@ curl -fsSL https://ghproxy.05160715.xyz/https://raw.githubusercontent.com/htt050
 
 安装器读取正在运行的 systemd 服务和 `/proc` 启动参数，自动识别实际二进制、工作目录和配置。标准 `/etc/mosdns/mosdns start --as-service -d /etc/mosdns` 会识别为 `/etc/mosdns/mosdns` 与 `/etc/mosdns/config.yaml`。
 
-已有面板时保留其明确的 IPv4 地址及端口；首次安装默认 `127.0.0.1:9099`。需要在局域网访问时指定本机局域网 IP：
+默认自动识别本机局域网 IPv4 并监听其 `9099` 端口，可直接从局域网访问 `http://局域网IP:9099/`。优先选择默认路由的私有 IPv4，排除常见容器/隧道接口；无法唯一识别时提示手动指定 `PANEL_IP`。已有明确的非回环 IPv4 面板地址和端口会保留；原来监听 `127.0.0.1` 或 `0.0.0.0` 时改用本机局域网地址，端口保留。需要手动指定时：
 
 ```sh
 sudo env PANEL_IP=192.168.50.110 PANEL_PORT=9099 sh /tmp/install-mosdns-webui.sh

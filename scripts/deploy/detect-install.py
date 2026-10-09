@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Detect a running systemd mosdns install, without executing config contents."""
 import json
+import ipaddress
 import os
 from pathlib import Path
 import re
@@ -11,6 +12,46 @@ import sys
 
 def command(*args):
     return subprocess.check_output(args, text=True).strip()
+
+
+def lan_address():
+    """Select an RFC1918 IPv4 on the default route, or one unique LAN address."""
+    private = [ipaddress.ip_network(n) for n in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')]
+    interfaces = json.loads(command('ip', '-j', '-4', 'addr', 'show', 'up'))
+    candidates = []
+    for interface in interfaces:
+        name = interface['ifname']
+        if name == 'lo' or name.startswith(('docker', 'veth', 'virbr', 'br-', 'tun', 'wg', 'tailscale')):
+            continue
+        for address in interface.get('addr_info', []):
+            host = address.get('local', '')
+            if address.get('family') == 'inet' and address.get('scope') == 'global' and any(ipaddress.ip_address(host) in net for net in private):
+                candidates.append((name, host))
+    try:
+        routes = json.loads(command('ip', '-j', '-4', 'route', 'get', '1.1.1.1'))
+    except (OSError, subprocess.CalledProcessError, ValueError):
+        routes = []
+    for route in routes:
+        for name, host in candidates:
+            if name == route.get('dev') and host == route.get('prefsrc'):
+                return host
+    hosts = sorted(set(host for _, host in candidates))
+    if len(hosts) == 1:
+        return hosts[0]
+    raise ValueError('Cannot uniquely detect LAN IPv4; set PANEL_IP to the machine LAN address.')
+
+
+def panel_address(config_text):
+    api = re.search(r'^api:[ \t]*(?:#.*)?\n((?:[ \t]+[^\n]*\n|\n)*)', config_text + '\n', re.M)
+    address = re.search(r'^\s+http:\s*["\x27]?([^\s"\x27#]+)', api[1]) if api else None
+    host, port = None, '9099'
+    if address and re.fullmatch(r'[0-9.]+:[0-9]+', address[1]):
+        current, port = address[1].rsplit(':', 1)
+        parsed = ipaddress.ip_address(current)
+        # Migrate existing loopback/all-interface panel listeners to the LAN IP.
+        if not parsed.is_loopback and not parsed.is_unspecified:
+            host = current
+    return (os.environ.get('PANEL_IP') or host or lan_address(), os.environ.get('PANEL_PORT') or port)
 
 
 def parse_process(args, cwd):
@@ -79,15 +120,7 @@ def detect():
     if os.path.realpath(values['MOSDNS_BINARY']) != executable:
         raise ValueError('Requested binary differs from the running service executable')
     config_text = Path(values['MOSDNS_CONFIG']).read_text(encoding='utf-8')
-    api = re.search(r'^api:[ \t]*(?:#.*)?\n((?:[ \t]+[^\n]*\n|\n)*)', config_text + '\n', re.M)
-    address = re.search(r'^\s+http:\s*["\x27]?([^\s"\x27#]+)', api[1]) if api else None
-    if address and re.fullmatch(r'[0-9.]+:[0-9]+', address[1]):
-        host, port = address[1].rsplit(':', 1)
-        if host != '0.0.0.0':
-            values['PANEL_IP'] = host
-            values['PANEL_PORT'] = port
-    values['PANEL_IP'] = os.environ.get('PANEL_IP') or values.get('PANEL_IP', '127.0.0.1')
-    values['PANEL_PORT'] = os.environ.get('PANEL_PORT') or values.get('PANEL_PORT', '9099')
+    values['PANEL_IP'], values['PANEL_PORT'] = panel_address(config_text)
     return values
 
 

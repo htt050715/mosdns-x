@@ -48,7 +48,7 @@ SERVICE=$MOSDNS_SERVICE
 ROOT=$MOSDNS_ROOT
 BINARY=$MOSDNS_BINARY
 CONFIG=$MOSDNS_CONFIG
-PANEL_IP=${PANEL_IP:-127.0.0.1}
+PANEL_IP=${PANEL_IP:?LAN address detection missing; set PANEL_IP}
 PANEL_PORT=${PANEL_PORT:-9099}
 EXEC_START=$(systemctl show "$SERVICE" --property=ExecStart --value)
 [ -f "$PAYLOAD" ] || fail "Binary not found: $PAYLOAD"
